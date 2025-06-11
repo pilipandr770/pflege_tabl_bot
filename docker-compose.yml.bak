@@ -1,0 +1,21 @@
+version: '3'
+
+services:
+  bot:
+    build: .
+    container_name: tablica_bot_pflege    volumes:
+      # Mount the configuration files and .env
+      - ./config.py:/app/config.py
+      - ./.env:/app/.env
+      # Mount directories for persistent storage of results and screenshots
+      - ./screenshots:/app/screenshots
+      - ./:/app/output
+    environment:
+      # Set this to "true" for headless mode when running in Docker
+      - SELENIUM_HEADLESS=true
+      # OpenAI API settings (uncomment and set these values)
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # - OPENAI_ASSISTANT_ID=${OPENAI_ASSISTANT_ID}
+      # Bot token (uncomment to use)
+      # - BOT_TOKEN=${BOT_TOKEN}
+    restart: unless-stopped

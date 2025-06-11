@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Project specific
+*.json
+*.png
+*.jpg
+*.jpeg
+*.gif
+screenshots/
+
+# Don't ignore these files
+!requirements.txt
+!config-example.py
+
+# Environment (never include in Docker image)
+.env
+
+# Configuration (should be mounted as volume)
+config.py

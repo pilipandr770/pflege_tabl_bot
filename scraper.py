@@ -8,6 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import time
 import logging
+import os
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 logger = logging.getLogger(__name__)
@@ -23,9 +24,14 @@ def get_empty_cells(url="https://app.meinpflegedienst.com/mp/?demo=X#uebersicht"
         list: List of strings describing empty cells found on the page
     """
     try:
-        # Setup headless browser
+        # Setup browser options
         chrome_options = Options()
-        chrome_options.add_argument("--headless=new")
+        
+        # Check if running in Docker or if SELENIUM_HEADLESS is set
+        if os.environ.get('SELENIUM_HEADLESS', '').lower() == 'true':
+            chrome_options.add_argument("--headless=new")
+            logger.info("Running Chrome in headless mode")
+            
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--window-size=1920,1080")
@@ -122,15 +128,50 @@ def process_standard_tables(driver, tables):
             # Get table identifier if possible
             table_id = table.get_attribute("id") or f"Table {table_idx+1}"
             
-            for row_idx, row in enumerate(rows):
-                cells = row.find_elements(By.TAG_NAME, "td")
+            # Extract all headers for better context
+            all_headers = []
+            try:
+                headers_row = table.find_elements(By.TAG_NAME, "th")
+                if headers_row:
+                    for header in headers_row:
+                        all_headers.append(header.text.strip())
+                elif len(rows) > 0:
+                    # Try to use first row as header if no TH elements
+                    first_row = rows[0]
+                    header_cells = first_row.find_elements(By.TAG_NAME, "td")
+                    for header_cell in header_cells:
+                        all_headers.append(header_cell.text.strip())
+                        
+                logger.info(f"Found headers for table {table_id}: {all_headers}")
+            except Exception as e:
+                logger.error(f"Error extracting headers for table {table_id}: {str(e)}")
+            
+            # Process each row, starting with the second row if the first was used for headers
+            start_row = 1 if len(all_headers) > 0 and len(rows) > 0 else 0
+            
+            for row_idx, row in enumerate(rows[start_row:], start=start_row):
+                # Try to find a row identifier (usually first cell or cells with specific classes)
+                row_identifier = None
+                try:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if cells and len(cells) > 0:
+                        row_identifier = cells[0].text.strip()
+                except:
+                    pass
+                
+                row_id_text = f" (ID: {row_identifier})" if row_identifier else ""
                 
                 for cell_idx, cell in enumerate(cells):
                     if not cell.text.strip():
                         # Empty cell found
                         # Get header info if possible
-                        header_info = get_header_info(table, row_idx, cell_idx)
-                        empty_cells.append(f"{table_id}, Row {row_idx+1}, Column {cell_idx+1} {header_info}")
+                        header_info = ""
+                        if all_headers and cell_idx < len(all_headers) and all_headers[cell_idx]:
+                            header_info = f" (Колонка: {all_headers[cell_idx]})"
+                        else:
+                            header_info = get_header_info(table, row_idx, cell_idx)
+                            
+                        empty_cells.append(f"{table_id}, Строка {row_idx+1}{row_id_text}, Колонка {cell_idx+1}{header_info}")
         except Exception as e:
             logger.error(f"Error processing table {table_idx+1}: {str(e)}")
     
@@ -145,53 +186,121 @@ def process_extjs_grids(driver, elements, selector):
             # Try to get a meaningful identifier
             element_id = element.get_attribute("id") or f"{selector.replace('div.', '')} {idx+1}"
             
+            # Log the identified element
+            logger.info(f"Processing ExtJS grid: {element_id}")
+            
             # ExtJS often uses div.x-grid-cell for cells
             cells = element.find_elements(By.CSS_SELECTOR, "div.x-grid-cell")
             
-            # Try to get table headers for more context
+            # Try to get table headers for more context using multiple methods
             header_texts = {}
+            all_headers = []
+            
+            # Method 1: Standard ExtJS header cells
             try:
                 headers = element.find_elements(By.CSS_SELECTOR, "div.x-column-header")
                 for i, header in enumerate(headers):
-                    header_texts[i] = header.text.strip()
-            except:
-                # If we can't find headers, try an alternative
+                    header_text = header.text.strip()
+                    header_texts[i] = header_text
+                    all_headers.append(header_text)
+                logger.info(f"Found {len(headers)} headers using method 1")
+            except Exception as e:
+                logger.warning(f"Error finding headers with method 1: {str(e)}")
+            
+            # Method 2: Header text spans
+            if not header_texts:
                 try:
                     headers = element.find_elements(By.CSS_SELECTOR, "span.x-column-header-text")
                     for i, header in enumerate(headers):
-                        header_texts[i] = header.text.strip()
-                except:
-                    pass
+                        header_text = header.text.strip()
+                        header_texts[i] = header_text
+                        all_headers.append(header_text)
+                    logger.info(f"Found {len(headers)} headers using method 2")
+                except Exception as e:
+                    logger.warning(f"Error finding headers with method 2: {str(e)}")
+            
+            # Method 3: Try to get header from the first row's cell contents
+            if not header_texts:
+                try:
+                    # Get all rows
+                    rows = element.find_elements(By.CSS_SELECTOR, "div.x-grid-item")
+                    if rows:
+                        # Get cells in first row
+                        first_row_cells = rows[0].find_elements(By.CSS_SELECTOR, "div.x-grid-cell")
+                        for i, cell in enumerate(first_row_cells):
+                            header_text = cell.text.strip()
+                            if header_text:  # Only add non-empty cells
+                                header_texts[i] = header_text
+                                all_headers.append(header_text)
+                        logger.info(f"Found {len(header_texts)} potential headers from first row")
+                except Exception as e:
+                    logger.warning(f"Error finding headers from first row: {str(e)}")
+            
+            # Log found headers
+            if header_texts:
+                logger.info(f"Headers for {element_id}: {header_texts}")
             
             if cells:
+                # Create a structure to track row identifiers
+                row_identifiers = {}
+                
+                # Try to extract row IDs from all rows first (usually in first column)
+                try:
+                    rows = element.find_elements(By.CSS_SELECTOR, "div.x-grid-item")
+                    for i, row in enumerate(rows):
+                        # Try to find a patient ID or name in the row
+                        patient_cells = row.find_elements(By.CSS_SELECTOR, "div.x-grid-cell")
+                        if patient_cells:
+                            # Assume first cell might contain patient ID/name
+                            row_identifiers[i] = patient_cells[0].text.strip()
+                except Exception as e:
+                    logger.warning(f"Error extracting row identifiers: {str(e)}")
+                
+                # Process each cell
                 for cell_idx, cell in enumerate(cells):
                     if not cell.text.strip():
                         # Try to get row and column information
                         row_info = "unknown"
                         col_info = "unknown"
+                        row_number = 0
                         
                         # ExtJS often has data-recordindex for rows
                         try:
                             row_parent = cell.find_element(By.XPATH, "./ancestor::div[contains(@class, 'x-grid-item')]")
                             if row_parent:
-                                row_info = row_parent.get_attribute("data-recordindex") or "unknown"
-                        except:
-                            pass
+                                row_record_index = row_parent.get_attribute("data-recordindex")
+                                if row_record_index:
+                                    row_number = int(row_record_index)
+                                    row_info = row_record_index
+                                    
+                                    # Add row identifier if available
+                                    if row_number in row_identifiers and row_identifiers[row_number]:
+                                        row_info += f" (Пациент: {row_identifiers[row_number]})"
+                        except Exception as e:
+                            logger.warning(f"Error getting row info: {str(e)}")
                         
-                        # And data-columnid for columns
+                        # Get column information
                         try:
                             col_id = cell.get_attribute("data-columnid")
                             if col_id:
                                 col_info = col_id
                             else:
-                                # Try to find column index and use header text if available
-                                col_info = f"Column {cell_idx % len(header_texts) + 1}"
-                                if header_texts and (cell_idx % len(header_texts)) in header_texts:
-                                    col_info += f" ({header_texts[cell_idx % len(header_texts)]})"
-                        except:
-                            col_info = f"Column {cell_idx+1}"
+                                # Calculate column index within its row
+                                try:
+                                    row_cells_count = len(header_texts) if header_texts else 1
+                                    col_index = cell_idx % row_cells_count
+                                    col_info = f"Колонка {col_index + 1}"
+                                    
+                                    # Add header text if available
+                                    if header_texts and col_index in header_texts:
+                                        col_info += f" ({header_texts[col_index]})"
+                                except:
+                                    col_info = f"Колонка {cell_idx + 1}"
+                        except Exception as e:
+                            logger.warning(f"Error getting column info: {str(e)}")
+                            col_info = f"Колонка {cell_idx + 1}"
                         
-                        empty_cells.append(f"{element_id}, Row {row_info}, {col_info} (Empty)")
+                        empty_cells.append(f"{element_id}, Строка {row_info}, {col_info} (Пустая ячейка)")
             else:
                 # No cells found, try looking for content containers
                 content_divs = element.find_elements(By.CSS_SELECTOR, "div.x-grid-cell-inner")
@@ -199,10 +308,12 @@ def process_extjs_grids(driver, elements, selector):
                 for div_idx, div in enumerate(content_divs):
                     if not div.text.strip():
                         column_info = ""
-                        if header_texts and (div_idx % len(header_texts)) in header_texts:
-                            column_info = f" ({header_texts[div_idx % len(header_texts)]})"
+                        if header_texts:
+                            col_index = div_idx % len(header_texts) if len(header_texts) > 0 else 0
+                            if col_index in header_texts:
+                                column_info = f" (Колонка: {header_texts[col_index]})"
                         
-                        empty_cells.append(f"{element_id}, Item {div_idx+1}{column_info} (Empty)")
+                        empty_cells.append(f"{element_id}, Запись {div_idx+1}{column_info} (Пустая ячейка)")
                         
         except Exception as e:
             logger.error(f"Error processing ExtJS element {idx+1}: {str(e)}")
@@ -232,3 +343,64 @@ def get_header_info(table, row_idx, cell_idx):
         return ""
     except Exception:
         return ""
+
+def dump_all_cells(url="https://app.meinpflegedienst.com/mp/?demo=X#uebersicht", filename=None):
+    """
+    Сохраняет все ячейки всех таблиц с названиями колонок в JSON-файл.
+    Формат:
+    {
+        "TableName1": [
+            {"row": 1, "data": {"Column1": "value", "Column2": "value", ...}},
+            ...
+        ],
+        ...
+    }
+    """
+    from selenium.webdriver.common.by import By
+    import json
+    import time
+    import os
+    
+    chrome_options = Options()
+    if os.environ.get('SELENIUM_HEADLESS', '').lower() == 'true':
+        chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-gpu")
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.get(url)
+    time.sleep(10)
+    
+    tables = driver.find_elements(By.TAG_NAME, "table")
+    all_tables = {}
+    for table_idx, table in enumerate(tables):
+        table_id = table.get_attribute("id") or f"Table {table_idx+1}"
+        rows = table.find_elements(By.TAG_NAME, "tr")
+        # Получаем заголовки
+        headers = []
+        header_cells = []
+        if rows:
+            ths = rows[0].find_elements(By.TAG_NAME, "th")
+            if ths:
+                header_cells = ths
+            else:
+                header_cells = rows[0].find_elements(By.TAG_NAME, "td")
+            headers = [cell.text.strip() for cell in header_cells]
+        # Сохраняем строки
+        table_data = []
+        for row_idx, row in enumerate(rows[1:], start=1):
+            cells = row.find_elements(By.TAG_NAME, "td")
+            row_data = {}
+            for col_idx, cell in enumerate(cells):
+                col_name = headers[col_idx] if col_idx < len(headers) else f"Column {col_idx+1}"
+                row_data[col_name] = cell.text.strip()
+            table_data.append({"row": row_idx, "data": row_data})
+        all_tables[table_id] = table_data
+    driver.quit()
+    # Сохраняем в файл
+    if not filename:
+        filename = f"all_cells_{int(time.time())}.json"
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(all_tables, f, ensure_ascii=False, indent=2)
+    return filename
