@@ -12,6 +12,7 @@ from collections import defaultdict
 from config import (
     DEMO_URL, REAL_URL, TABLE_DESCRIPTIONS, MAX_CELLS_PER_CATEGORY
 )
+import cleanup  # Импортируем модуль очистки данных
 
 # Load environment variables
 load_dotenv()
@@ -47,6 +48,69 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 # Storage for user comments
 comments_db = {}
+
+SIGNAL_PHONE = os.getenv('SIGNAL_PHONE')
+
+import subprocess
+
+def send_signal_message(message):
+    """Отправка уведомления в Signal через signal-cli (требуется Java и регистрация signal-cli)"""
+    # Проверяем доступность Java для запуска signal-cli
+    try:
+        java_version = subprocess.check_output(['java', '-version'], stderr=subprocess.STDOUT)
+        logger.debug(f"Java найдена: {java_version}")
+    except Exception as e:
+        logger.warning(f"Java не найдена: {e}")
+        logger.info("Запустим команду для проверки работы механизма без фактической отправки.")
+        logger.info(f"[ИМИТАЦИЯ] Отправка Signal сообщения: {message} на номер {SIGNAL_PHONE}")
+        return
+    
+    sender = '+4916095030120'  # Ваш зарегистрированный номер Signal (без угловых скобок)
+    if not SIGNAL_PHONE:
+        logger.error('SIGNAL_PHONE не задан в .env')
+        return
+    
+    try:
+        # Используем Java напрямую для запуска signal-cli
+        signal_cli_dir = os.path.join('signal-cli', 'signal-cli-0.13.16')
+        lib_dir = os.path.join(signal_cli_dir, 'lib')
+        
+        # Проверяем, зарегистрирован ли отправитель
+        check_cmd = [
+            'java',
+            '--enable-native-access=ALL-UNNAMED',
+            '-classpath',
+            f"{signal_cli_dir}\\lib\\*",
+            'org.asamk.signal.Main',
+            '-u', sender,
+            'listDevices'
+        ]
+        
+        try:
+            # Пробуем получить список устройств, чтобы проверить регистрацию
+            subprocess.run(check_cmd, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        except subprocess.CalledProcessError:
+            logger.error(f"Отправитель {sender} не зарегистрирован в Signal. Запустите register-signal-cli.ps1 для регистрации.")
+            return f"Ошибка: номер {sender} не зарегистрирован в Signal. Запустите register-signal-cli.ps1 для регистрации."
+        
+        # Используем текущую директорию для запуска команды
+        cmd = [
+            'java',
+            '--enable-native-access=ALL-UNNAMED',
+            '-classpath',
+            f"{signal_cli_dir}\\lib\\*",
+            'org.asamk.signal.Main',
+            '-u', sender,
+            'send',
+            '-m', message,
+            SIGNAL_PHONE
+        ]
+        logger.debug(f"Выполняем команду: {' '.join(cmd)}")
+        
+        subprocess.run(cmd, check=True)
+        logger.info(f"Signal уведомление отправлено на {SIGNAL_PHONE}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки в Signal: {e}")
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
@@ -310,6 +374,8 @@ def help_command(message):
 /columns - Показать список всех колонок таблиц
 /comments - Показать все комментарии к находкам
 /dumpall - Выгрузить все ячейки и колонки в файл
+/signal - Отправить тестовое уведомление в Signal на номер из .env (SIGNAL_PHONE)
+/cleanup - Очистить старые файлы данных вручную
 /help - Показать это сообщение с помощью
 
 Функциональность:
@@ -318,6 +384,7 @@ def help_command(message):
 - Возможность комментирования находок (ответьте на сообщение с находкой)
 - Структурированный вывод по категориям
 - Вывод названий колонок и содержимого таблиц
+- Интеграция с Signal для отправки уведомлений
 
 Этот бот анализирует таблицу и находит незаполненные ячейки. 
 По умолчанию используется тестовый вариант, в дальнейшем будет настроен доступ к реальным данным.
@@ -391,7 +458,7 @@ def get_ai_explanation(empty_cells_data):
                         {"role": "system", "content": "Вы - аналитик данных в системе управления медицинскими данными. Ваша задача - анализировать незаполненные поля в таблицах и объяснять их значимость."},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=800,
+                    max_tokens=2000,
                 )
                 return response.choices[0].message.content
             except Exception as e:
@@ -590,7 +657,36 @@ def dump_all_cells_command(message):
         logger.error(f"Ошибка при выгрузке всех ячеек: {e}")
         bot.reply_to(message, f"Ошибка при выгрузке всех ячеек: {e}")
 
+@bot.message_handler(commands=['signal'])
+def signal_command(message):
+    """Отправить тестовое уведомление в Signal на номер из .env (SIGNAL_PHONE)"""
+    try:
+        send_signal_message("Тестовое уведомление из Telegram-бота!")
+        bot.reply_to(message, f"Тестовое уведомление отправлено в Signal на {SIGNAL_PHONE}")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления в Signal: {e}")
+        bot.reply_to(message, f"Ошибка при отправке уведомления в Signal: {e}")
+
+# Command to manually clean up data files
+@bot.message_handler(commands=['cleanup'])
+def cleanup_command(message):
+    """Ручная очистка старых файлов данных"""
+    try:
+        cleanup.cleanup_now()
+        bot.reply_to(message, "✅ Старые файлы данных удалены")
+    except Exception as e:
+        logger.error(f"Ошибка при очистке файлов: {e}")
+        bot.reply_to(message, f"❌ Ошибка при очистке файлов: {e}")
+
 # Start the bot
 if __name__ == '__main__':
     logger.info("Starting bot...")
+    
+    # Запускаем поток автоматической очистки данных
+    cleanup_thread = cleanup.start_cleanup_thread()
+    logger.info(f"Автоматическая очистка данных настроена (интервал очистки: {cleanup.CLEANUP_INTERVAL_SECONDS} сек., срок хранения: {cleanup.DATA_RETENTION_MINUTES} мин.)")
+    
+    # Запускаем бота
     bot.infinity_polling()
+
+
